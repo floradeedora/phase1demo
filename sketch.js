@@ -8,12 +8,16 @@ let lastCameraButtonPress = 0;
 let recorder = null;
 let recordChunks = [];
 let recordButton;
-let backButton;
 let isRecording = false;
 let playBack = false;
 let recordedURL = null;
 let playbackVideo = null;
 let recordStopTimer = null;
+
+let gifImage = null;
+let gifURL = null;
+let isConverting = false;
+let gifWorkerURLCache = null;
 
 
 function setup() {
@@ -23,7 +27,6 @@ function setup() {
   cam = createPhoneCamera('user', true, 'fitHeight');
   createCameraButton();
   createRecordButton();
-  createBackButton();
 
   enableCameraTap();
 
@@ -82,28 +85,8 @@ function createRecordButton(){
   });
 }
 
-function createBackButton() {
-  backButton = createButton('Back to camera');
-  backButton.style('position', 'fixed');
-  backButton.style('left', '50%');
-  backButton.style('transform', 'translateX(-50%)');
-  backButton.style('bottom', '24px');
-  backButton.style('z-index', '50');
-  backButton.style('padding', '12px 18px');
-  backButton.style('font-size', '15px');
-  backButton.style('font-weight', '700');
-  backButton.style('border', '0');
-  backButton.style('border-radius', '8px');
-  backButton.hide();
-  backButton.mousePressed(() => {
-    lastCameraButtonPress = Date.now();
-    closePlayback();
-    return false;
-  });
-}
-
 function startRecording() {
-  if (!cam || !cam.ready || isRecording || playBack) return false;
+  if (!cam || !cam.ready || isRecording || playBack || isConverting) return false;
   const stream = cam.videoElement.srcObject;
   if (!stream) return false;
 
@@ -140,8 +123,100 @@ function onRecordingStopped() {
 
   if (recordedURL) URL.revokeObjectURL(recordedURL);   // don't leak old blobs
   recordedURL = URL.createObjectURL(blob);
-  showPlayback();
+
+  convertToGif(recordedURL).catch((err) => {
+    console.error('GIF conversion failed', err);
+    clearMl5Loading();
+    isConverting = false;
+    showPlayback();
+  });
 }
+
+async function getGifWorkerUrl() {
+  if (gifWorkerURLCache) return gifWorkerURLCache;
+  // gif.js workers must be same-origin — fetch the CDN file and wrap it in a blob URL
+  const src = await fetch('https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js')
+    .then((r) => r.text());
+  gifWorkerURLCache = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  return gifWorkerURLCache;
+}
+
+async function convertToGif(sourceUrl) {
+  isConverting = true;
+  setMl5Loading('Making GIF… 0%');
+
+  // hidden video element plays the recorded blob
+  const video = document.createElement('video');
+  video.src = sourceUrl;
+  video.muted = true;
+  video.playsInline = true;                 // required on iOS
+  await new Promise((resolve, reject) => { 
+    video.onloadedmetadata = resolve;
+    video.onerror = () => reject(Error('Could not read recorded clip'));
+    setTimeout(() => reject(new Error('Timed out reading the recorded clip')), 10000);
+  });
+
+  // small capture canvas — 320px wide keeps the GIF a few MB; mirror baked in
+  const w = 320;
+  const h = Math.round((video.videoHeight * (w / video.videoWidth)) / 2) * 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (cam.mirror) { ctx.translate(w, 0); ctx.scale(-1, 1); }
+
+  const gif = new GIF({
+    workers: 2,
+    quality: 10,
+    width: w,
+    height: h,
+    workerScript: await getGifWorkerUrl(),
+  });
+  gif.on('progress', (p) => setMl5Loading('Making GIF… ' + Math.round(p * 100) + '%'));
+
+  // play the clip once, grabbing ~10 frames per second
+  video.currentTime = 0;
+  await video.play();
+  const capture = setInterval(() => {
+    ctx.drawImage(video, 0, 0, w, h);
+    gif.addFrame(ctx, { copy: true, delay: 100 });
+  }, 100);
+  await new Promise((res) => { video.onended = res; });
+  clearInterval(capture);
+  video.remove();
+
+  // encode → object URL → show
+  const gifBlob = await new Promise((resolve) => {
+    gif.on('finished', resolve);
+    gif.render();
+  });
+
+  if (gifURL) URL.revokeObjectURL(gifURL);
+  gifURL = URL.createObjectURL(gifBlob);
+  clearMl5Loading();
+  isConverting = false;
+  showGifPlayback(gifURL);
+}
+
+function showGifPlayback(url) {
+  playBack = true;
+  showVideo = false;                        // draw() stops painting the live feed
+
+  gifImage = createImg(url);                // <img> loops automatically — GIF behaviour
+  gifImage.style('position', 'fixed');
+  gifImage.style('inset', '0');
+  gifImage.style('width', '100%');
+  gifImage.style('height', '100%');
+  gifImage.style('object-fit', 'contain');
+  gifImage.style('background', '#000');
+  gifImage.style('z-index', '40');
+
+  recordButton.hide();
+
+  if (cam) cam.remove();   // release the camera — light off, battery saved
+  noLoop();  //stops drawing
+}
+
 
 // ── New: playback replaces the feed ────────────────────────────────
 function showPlayback() {
@@ -163,15 +238,6 @@ function showPlayback() {
 
   playbackVideo.elt.play().catch(() => {}); // controls are there if autoplay is blocked
   recordButton.hide();
-  backButton.show();
-}
-
-function closePlayback() {
-  playBack = false;
-  if (playbackVideo) { playbackVideo.remove(); playbackVideo = null; }
-  backButton.hide();
-  recordButton.show();
-  showVideo = true;                         // live feed returns
 }
 
 async function switchCameraView() {
@@ -236,6 +302,9 @@ function draw() {
   text('REC', width - 44, height - 30);
   pop();
   }
+
+  if (isMl5Loading()) drawMl5LoadingGraphic();   // new: shows "Making GIF… 42%" spinner
+
 }
 
 function drawPhoneCamera(phoneCamera) {
@@ -289,3 +358,8 @@ function mousePressed() {
 
 //<----camera recording----->
 //used AI to generate the code needed to create a recording, and also used AI to review any mistakes made in the process
+
+//<----gif maker---->
+//used AI to convert the recordings into a gif so that it can be transfered and altered on another device
+//deleted the back button after gif has been made
+//removed closeplayback since back button is gone
