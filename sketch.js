@@ -212,6 +212,7 @@ async function convertToGif(sourceUrl) {
   clearMl5Loading();
   isConverting = false;
   showGifPlayback(gifURL);
+  deliverGifToViewer(gifBlob);  
 }
 
 function showGifPlayback(url) {
@@ -228,6 +229,7 @@ function showGifPlayback(url) {
   gifImage.style('z-index', '40');
 
   recordButton.hide();
+  setStatus('Waiting for phone…'); 
 
   if (cam) cam.remove();   // release the camera — light off, battery saved
   noLoop();  //stops drawing
@@ -399,6 +401,8 @@ function waitForCameraReady() {
 function draw() {
   background(220);
 
+  if (ROLE === 'view') { drawViewer(); return; }
+
   if (playBack) return;
 
   if (showVideo && cam.ready) drawPhoneCamera(cam);
@@ -469,7 +473,8 @@ function drawUI() {
 }
 
 function mousePressed() {
-  if (playBack) return false; 
+  if (playBack) return false;
+  if (ROLE === 'view') return false; 
   if (Date.now() - lastCameraButtonPress < 400) {
     return false;
   }
@@ -489,3 +494,6 @@ function mousePressed() {
 //used AI to convert the recordings into a gif so that it can be transfered and altered on another device
 //deleted the back button after gif has been made
 //removed closeplayback since back button is gone
+
+//<----gif transfer to different devices---->
+//used AI to help find a way to "less manually" transfer the gif recording from one device to another (currently can be done between a laptop and phone)
