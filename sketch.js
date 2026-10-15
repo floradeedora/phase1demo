@@ -19,14 +19,30 @@ let gifURL = null;
 let isConverting = false;
 let gifWorkerURLCache = null;
 
+// ── New: auto-delivery state ───────────────────────────────────────
+const VIEWER_ID = 'phase1demo-gif';                       // the fixed "mailbox" both devices agree on
+const ROLE = new URLSearchParams(window.location.search).get('mode')
+  || (window.isMobile ? 'view' : 'record');               // phone = viewer, laptop = sender
+
+let peer = null;
+let statusDiv = null;
+let viewerStatus = 'Waiting for a recording…';
+let gifParts = [];
+
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
   lockGestures();
 
+  if (ROLE === 'view'){
+    setupViewer();
+    return;
+  }
+
   cam = createPhoneCamera('user', true, 'fitHeight');
   createCameraButton();
   createRecordButton();
+  createStatusDiv();
 
   enableCameraTap();
 
@@ -217,8 +233,105 @@ function showGifPlayback(url) {
   noLoop();  //stops drawing
 }
 
+//New: status pill (sender)
+function createStatusDiv() {
+  statusDiv = createDiv('');
+  statusDiv.style('position', 'fixed');
+  statusDiv.style('left', '50%');
+  statusDiv.style('transform', 'translateX(-50%)');
+  statusDiv.style('bottom', '24px');
+  statusDiv.style('z-index', '50');
+  statusDiv.style('padding', '12px 18px');
+  statusDiv.style('font-size', '15px');
+  statusDiv.style('font-weight', '700');
+  statusDiv.style('font-family', 'Arial, sans-serif');
+  statusDiv.style('border-radius', '8px');
+  statusDiv.style('background', '#ffffff');
+  statusDiv.style('color', '#111111');
+  statusDiv.style('box-shadow', '0 4px 14px rgba(0, 0, 0, 0.25)');
+  statusDiv.hide();
+}
 
-// ── New: playback replaces the feed ────────────────────────────────
+function setStatus(message, color) {
+  if (!statusDiv) return;
+  statusDiv.html(message);
+  statusDiv.style('background', color || '#ffffff');
+  statusDiv.show();
+}
+
+// ── New: sender — knock until the phone answers, then send ─────────
+function deliverGifToViewer(blob) {
+  if (!peer) peer = new Peer();            // sender needs no fixed ID
+
+  const knock = () => {
+    const conn = peer.connect(VIEWER_ID, { reliable: true });
+    conn.on('open', async () => {
+      conn.send({ type: 'gif-meta', size: blob.size });
+      const CHUNK = 64 * 1024;
+      for (let i = 0; i < blob.size; i += CHUNK) {
+        conn.send(await blob.slice(i, i + CHUNK).arrayBuffer());
+      }
+      conn.send({ type: 'gif-done' });
+      setStatus('Sent to phone ✓', '#b8f5c0');
+    });
+    conn.on('close', () => setTimeout(knock, 3000));   // phone left → keep knocking
+  };
+
+    peer.on('error', (err) => {
+    if (err.type === 'peer-unavailable') {             // phone not on the page yet
+      setStatus('Waiting for phone… (open the page on your phone)');
+      setTimeout(knock, 3000);
+    }
+  });
+
+  knock();
+}
+
+function setupViewer() {
+  peer = new Peer(VIEWER_ID);              // claim the fixed mailbox
+  peer.on('open', () => { viewerStatus = 'Waiting for a recording…'; });
+  peer.on('connection', (conn) => {
+    conn.on('data', handleGifChunk);
+  });
+  peer.on('error', () => {                 // slot held by another viewer, or broker hiccup
+    try { peer.destroy(); } catch (e) {}
+    peer = null;
+    viewerStatus = 'Waiting…';
+    setTimeout(setupViewer, 3000);
+  });
+}
+
+function handleGifChunk(data) {
+  if (data && data.type === 'gif-meta') {
+    gifParts = [];
+    viewerStatus = 'Receiving…';
+  }
+  else if (data && data.type === 'gif-done') {
+    const blob = new Blob(gifParts, { type: 'image/gif' });
+    gifParts = [];
+    showReceivedGif(URL.createObjectURL(blob));
+  }
+  else if (data) {
+    gifParts.push(data);                   // ArrayBuffer chunk
+  }
+}
+
+function showReceivedGif(url) {
+  playBack = true;
+
+  if (gifImage) gifImage.remove();         // a newer GIF replaces the previous one
+  gifImage = createImg(url);
+  gifImage.style('position', 'fixed');
+  gifImage.style('inset', '0');
+  gifImage.style('width', '100%');
+  gifImage.style('height', '100%');
+  gifImage.style('object-fit', 'contain');
+  gifImage.style('background', '#000');
+  gifImage.style('z-index', '40');
+  // the p5 loop can keep running — it just paints black behind the GIF
+}
+
+
 function showPlayback() {
   playBack = true;
   showVideo = false;                        // draw() stops painting the live feed
@@ -305,6 +418,19 @@ function draw() {
 
   if (isMl5Loading()) drawMl5LoadingGraphic();   // new: shows "Making GIF… 42%" spinner
 
+}
+
+function drawViewer() {
+  push();
+  background(0);
+  if (!playBack) {                          // before the GIF arrives, show status text
+    fill(255);
+    noStroke();
+    textAlign(CENTER, CENTER);
+    textSize(18);
+    text(viewerStatus, width / 2, height / 2);
+  }
+  pop();
 }
 
 function drawPhoneCamera(phoneCamera) {
