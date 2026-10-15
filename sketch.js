@@ -5,12 +5,25 @@ let cameraSwitching = false;
 let lastCameraButtonPress = 0;
 
 
+let recorder = null;
+let recordChunks = [];
+let recordButton;
+let backButton;
+let isRecording = false;
+let playBack = false;
+let recordedURL = null;
+let playbackVideo = null;
+let recordStopTimer = null;
+
+
 function setup() {
   createCanvas(windowWidth, windowHeight);
   lockGestures();
 
   cam = createPhoneCamera('user', true, 'fitHeight');
   createCameraButton();
+  createRecordButton();
+  createBackButton();
 
   enableCameraTap();
 
@@ -48,10 +61,123 @@ function createCameraButton() {
   cameraButton.mousePressed(switchCameraView);
 }
 
+function createRecordButton(){
+  recordButton = createButton('Record');
+  recordButton.style('position', 'fixed');
+  recordButton.style('right', '14px');       // opposite the Back-camera button
+  recordButton.style('top', '14px');
+  recordButton.style('z-index', '20');
+  recordButton.style('padding', '12px 14px');
+  recordButton.style('font-size', '15px');
+  recordButton.style('font-weight', '700');
+  recordButton.style('border', '0');
+  recordButton.style('border-radius', '8px');
+  recordButton.style('background', '#e11d1d');
+  recordButton.style('color', '#ffffff');
+  recordButton.style('box-shadow', '0 4px 14px rgba(0, 0, 0, 0.25)');
+  recordButton.mousePressed(() => {
+    lastCameraButtonPress = Date.now();      // keeps the tap-to-toggle guard happy
+    if (isRecording) stopRecording(); else startRecording();
+    return false;
+  });
+}
+
+function createBackButton() {
+  backButton = createButton('Back to camera');
+  backButton.style('position', 'fixed');
+  backButton.style('left', '50%');
+  backButton.style('transform', 'translateX(-50%)');
+  backButton.style('bottom', '24px');
+  backButton.style('z-index', '50');
+  backButton.style('padding', '12px 18px');
+  backButton.style('font-size', '15px');
+  backButton.style('font-weight', '700');
+  backButton.style('border', '0');
+  backButton.style('border-radius', '8px');
+  backButton.hide();
+  backButton.mousePressed(() => {
+    lastCameraButtonPress = Date.now();
+    closePlayback();
+    return false;
+  });
+}
+
+function startRecording() {
+  if (!cam || !cam.ready || isRecording || playBack) return false;
+  const stream = cam.videoElement.srcObject;
+  if (!stream) return false;
+
+  // iOS Safari wants mp4; Chrome/Android want webm — pick the first supported
+  const types = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const mimeType = types.find((t) => MediaRecorder.isTypeSupported(t));
+
+  recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  recordChunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordChunks.push(e.data); };
+  recorder.onstop = onRecordingStopped;
+
+  recorder.start();
+  isRecording = true;
+  recordButton.html('Stop');
+
+  clearTimeout(recordStopTimer);
+  recordStopTimer = setTimeout(stopRecording, 5000);   // the "small bit" — auto-stop
+  return false;
+}
+
+function stopRecording() {
+  clearTimeout(recordStopTimer);
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+}
+
+function onRecordingStopped() {
+  isRecording = false;
+  recordButton.html('Record');
+
+  const blob = new Blob(recordChunks, { type: recorder.mimeType || 'video/webm' });
+  recordChunks = [];
+  recorder = null;
+
+  if (recordedURL) URL.revokeObjectURL(recordedURL);   // don't leak old blobs
+  recordedURL = URL.createObjectURL(blob);
+  showPlayback();
+}
+
+// ── New: playback replaces the feed ────────────────────────────────
+function showPlayback() {
+  playBack = true;
+  showVideo = false;                        // draw() stops painting the live feed
+
+  playbackVideo = createElement('video');
+  playbackVideo.attribute('controls', '');
+  playbackVideo.attribute('playsinline', '');   // required on iOS
+  playbackVideo.attribute('src', recordedURL);
+  playbackVideo.style('position', 'fixed');
+  playbackVideo.style('inset', '0');
+  playbackVideo.style('width', '100%');
+  playbackVideo.style('height', '100%');
+  playbackVideo.style('object-fit', 'contain');
+  playbackVideo.style('background', '#000');
+  playbackVideo.style('z-index', '40');
+  if (cam.mirror) playbackVideo.style('transform', 'scaleX(-1)');  // match the mirrored live view
+
+  playbackVideo.elt.play().catch(() => {}); // controls are there if autoplay is blocked
+  recordButton.hide();
+  backButton.show();
+}
+
+function closePlayback() {
+  playBack = false;
+  if (playbackVideo) { playbackVideo.remove(); playbackVideo = null; }
+  backButton.hide();
+  recordButton.show();
+  showVideo = true;                         // live feed returns
+}
+
 async function switchCameraView() {
   lastCameraButtonPress = Date.now();
 
-  if (!cam || cameraSwitching) {
+  if (!cam || cameraSwitching || isRecording) {
     return false;
   }
 
@@ -94,8 +220,21 @@ function waitForCameraReady() {
 function draw() {
   background(220);
 
-    if (showVideo && cam.ready) {
-      drawPhoneCamera(cam);
+  if (playBack) return;
+
+  if (showVideo && cam.ready) drawPhoneCamera(cam);
+  drawUI();
+  
+  if (isRecording) {                        // red REC dot, bottom-right
+  push();
+  noStroke();
+  fill(255, 0, 0);
+  circle(width - 26, height - 40, 18);
+  fill(255);
+  textAlign(RIGHT, BOTTOM);
+  textSize(15);
+  text('REC', width - 44, height - 30);
+  pop();
   }
 }
 
@@ -135,6 +274,7 @@ function drawUI() {
 }
 
 function mousePressed() {
+  if (playBack) return false; 
   if (Date.now() - lastCameraButtonPress < 400) {
     return false;
   }
@@ -143,5 +283,9 @@ function mousePressed() {
   return false;
 }
 
+//notes:
 //used AI to assess why the camera wasn't turning on/recording
 //all the code was taken from p5.js example code: PHONE HandPose Two Points 
+
+//<----camera recording----->
+//used AI to generate the code needed to create a recording, and also used AI to review any mistakes made in the process
