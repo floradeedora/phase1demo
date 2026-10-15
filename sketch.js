@@ -142,3 +142,6 @@ function mousePressed() {
   showVideo = !showVideo;
   return false;
 }
+
+//used AI to assess why the camera wasn't turning on/recording
+//all the code was taken from p5.js example code: PHONE HandPose Two Points 
