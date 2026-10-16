@@ -4,7 +4,6 @@ let cameraButton;
 let cameraSwitching = false;
 let lastCameraButtonPress = 0;
 
-
 let recorder = null;
 let recordChunks = [];
 let recordButton;
@@ -26,6 +25,7 @@ const ROLE = new URLSearchParams(window.location.search).get('mode')
 
 let peer = null;
 let statusDiv = null;
+let knockTimer = null;
 let viewerStatus = 'Waiting for a recording…';
 let gifParts = [];
 
@@ -280,13 +280,14 @@ function deliverGifToViewer(blob) {
   };
 
     peer.on('error', (err) => {
-    if (err.type === 'peer-unavailable') {             // phone not on the page yet
+    if (err.type === 'peer-unavailable' && !knockTimer) {             // phone not on the page yet
       setStatus('Waiting for phone… (open the page on your phone)');
-      setTimeout(knock, 3000);
+      knockTimer = setTimeout(() => { knockTimer = null; knock(); }, 3000);
     }
   });
 
-  knock();
+    if (peer.open) knock();              // peer already online → knock right now
+    else peer.once('open', knock); 
 }
 
 function setupViewer() {
@@ -321,7 +322,7 @@ function handleGifChunk(data) {
 function showReceivedGif(url) {
   playBack = true;
 
-  if (gifImage) gifImage.remove();         // a newer GIF replaces the previous one
+  if (gifImage) gifImage.remove();
   gifImage = createImg(url);
   gifImage.style('position', 'fixed');
   gifImage.style('inset', '0');
