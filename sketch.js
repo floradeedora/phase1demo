@@ -20,8 +20,14 @@ let gifWorkerURLCache = null;
 
 
 const VIEWER_ID = 'phase1demo-gif';                       // the fixed "mailbox" both devices agree on
-const ROLE = new URLSearchParams(window.location.search).get('mode')
-  || (window.isMobile ? 'view' : 'record');               // phone = viewer, laptop = sender
+const RECORDER_ID = 'phase1demo-recorder';
+
+const MODE_PARAM = new URLSearchParams(window.location.search).get('mode');
+const VALID_MODE = MODE_PARAM === 'record' || MODE_PARAM === 'view';
+let ROLE = VALID_MODE ? MODE_PARAM
+        : (localStorage.getItem('phase1demo-role') || 'pending');
+if(VALID_MODE) localStorage.setItem('phase1demo-role', MODE_PARAM);
+
 
 let peer = null;
 let statusDiv = null;
@@ -34,10 +40,13 @@ function setup() {
   createCanvas(windowWidth, windowHeight);
   lockGestures();
 
-  if (ROLE === 'view'){
-    setupViewer();
-    return;
-  }
+  if(ROLE !== 'pending'){ initRole(); return; }
+  resolveRoleByRace();
+}
+
+function initRole() {
+  if(ROLE === 'view'){setupViewer(); return;}
+  ensureRecorderLock(); 
 
   cam = createPhoneCamera('user', true, 'fitHeight');
   createCameraButton();
@@ -45,6 +54,8 @@ function setup() {
   createStatusDiv();
 
   enableCameraTap();
+
+  if(navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});
 
   setMl5Loading('Waiting for camera');
   cam.onReady(async () => {
@@ -55,6 +66,54 @@ function setup() {
     };
 
     clearMl5Loading();
+  });
+}
+
+function finishRole(role) {      
+  if (ROLE !== 'pending') return;           
+  ROLE = role;
+  localStorage.setItem('phase1demo-role', role);
+  initRole();
+}
+
+function resolveRoleByRace() {
+  let attempts = 0;
+  let resolved = false;
+  const attempt = () => {
+    const lock = new Peer(RECORDER_ID);
+    lock.on('open', () => {
+      if(resolved) return;
+      resolved = true;
+      peer = lock;
+      lock.on('disconnected', () => {try {lock.reconnect();} catch (e) {}});
+      finishRole('record');
+    });
+    lock.on('error', (err) => {
+      if(resolved) return;
+      try { lock.destroy(); } catch (e) {}
+      if(err.type === 'unavailable-id') {
+        finishRole('view');
+      }else if (++attempts >= 6) {
+        finishRole(window.isMobile ? 'view' : 'record');
+      }else {
+        setTimeout(attempt, 3000);
+      }
+    });
+  };
+  attempt();
+}
+
+function ensureRecorderLock() {               // recorder always holds the lock, race or not
+  if (peer && !peer.destroyed) return;        // the race already won it → skip
+  const lock = new Peer(RECORDER_ID);
+  lock.on('open', () => {
+    lock.on('disconnected', () => { try { lock.reconnect(); } catch (e) {} });  // screen locked → re-claim
+  });
+  lock.on('error', (err) => {   
+    if (err.type !== 'unavailable-id') return;                 // stale previous session still holding it → retry
+    try { lock.destroy(); } catch (e) {}
+    if (peer === lock) peer = null;
+    if (ROLE === 'record') setTimeout(ensureRecorderLock, 3000);
   });
 }
 
@@ -280,7 +339,7 @@ function deliverGifToViewer(blob) {
   };
 
     peer.on('error', (err) => {
-    if (err.type === 'peer-unavailable' && !knockTimer) {             // phone not on the page yet
+    if (err.type === 'peer-unavailable' && !knockTimer) {
       setStatus('Waiting for phone… (open the page on your phone)');
       knockTimer = setTimeout(() => { knockTimer = null; knock(); }, 3000);
     }
@@ -293,15 +352,16 @@ function deliverGifToViewer(blob) {
 function setupViewer() {
   peer = new Peer(VIEWER_ID);              // claim the fixed mailbox
   peer.on('open', () => { viewerStatus = 'Waiting for a recording…'; });
-  peer.on('connection', (conn) => {
-    conn.on('data', handleGifChunk);
+  peer.on('connection', (conn) => { conn.on('data', handleGifChunk);});
+  peer.on('disconnected', () => { viewerStatus = 'Reconnecting';
+    try { peer.reconnect(); } catch (e) {}
   });
-  peer.on('error', () => {                 // slot held by another viewer, or broker hiccup
+  peer.on('error', () => {
     try { peer.destroy(); } catch (e) {}
     peer = null;
-    viewerStatus = 'Waiting…';
+    viewerStatus = 'Waiting)';
     setTimeout(setupViewer, 3000);
-  });
+  })
 }
 
 function handleGifChunk(data) {
@@ -402,6 +462,7 @@ function waitForCameraReady() {
 function draw() {
   background(220);
 
+  if (ROLE === 'pending') return; 
   if (ROLE === 'view') { drawViewer(); return; }
 
   if (playBack) return;
@@ -475,6 +536,7 @@ function drawUI() {
 
 function mousePressed() {
   if (playBack) return false;
+  if (ROLE === 'pending') return false;
   if (ROLE === 'view') return false; 
   if (Date.now() - lastCameraButtonPress < 400) {
     return false;
@@ -483,6 +545,14 @@ function mousePressed() {
   showVideo = !showVideo;
   return false;
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible'
+      && peer && peer.disconnected && !peer.destroyed) {
+    try { peer.reconnect(); } catch (e) {}
+    setTimeout(() => { if (peer && peer.open && ROLE === 'view') viewerStatus = 'Waiting for a recording…'; }, 2500);
+  }
+});
 
 //notes:
 //used AI to assess why the camera wasn't turning on/recording
