@@ -18,7 +18,7 @@ let gifURL = null;
 let isConverting = false;
 let gifWorkerURLCache = null;
 
-// ── New: auto-delivery state ───────────────────────────────────────
+
 const VIEWER_ID = 'phase1demo-gif';                       // the fixed "mailbox" both devices agree on
 const ROLE = new URLSearchParams(window.location.search).get('mode')
   || (window.isMobile ? 'view' : 'record');               // phone = viewer, laptop = sender
